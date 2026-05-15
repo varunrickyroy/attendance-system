@@ -119,17 +119,12 @@ HTML_TEMPLATE = '''
             padding: 25px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }
-        h2 { 
-            color: #333; 
-            margin-bottom: 25px; 
-            text-align: center;
-            font-size: 24px;
+        .login-container {
+            max-width: 500px;
+            margin: 50px auto;
         }
-        h3 {
-            color: #555;
-            margin: 20px 0 10px 0;
-            font-size: 18px;
-        }
+        h2 { color: #333; margin-bottom: 25px; text-align: center; font-size: 24px; }
+        h3 { color: #555; margin: 20px 0 10px 0; font-size: 18px; }
         input {
             width: 100%;
             padding: 14px;
@@ -181,10 +176,7 @@ HTML_TEMPLATE = '''
             border-bottom: 1px solid #ddd;
             font-size: 14px;
         }
-        th {
-            background: #667eea;
-            color: white;
-        }
+        th { background: #667eea; color: white; }
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -198,10 +190,7 @@ HTML_TEMPLATE = '''
             text-align: center;
             border-radius: 15px;
         }
-        .stat-card .number {
-            font-size: 28px;
-            font-weight: bold;
-        }
+        .stat-card .number { font-size: 28px; font-weight: bold; }
         .location-box {
             background: #e7f3ff;
             padding: 12px;
@@ -220,10 +209,7 @@ HTML_TEMPLATE = '''
         .success { background: #d4edda; color: #155724; display: block; }
         .error { background: #f8d7da; color: #721c24; display: block; }
         .info { background: #d1ecf1; color: #0c5460; display: block; }
-        .login-container {
-            max-width: 500px;
-            margin: 50px auto;
-        }
+        .delete-btn { background: #dc3545; padding: 5px 10px; font-size: 12px; width: auto; margin: 0; }
         @media (max-width: 600px) {
             .container { padding: 20px; }
             .nav-buttons button { font-size: 12px; padding: 8px; }
@@ -525,16 +511,38 @@ HTML_TEMPLATE = '''
         const res = await fetch('/api/admin/users');
         const data = await res.json();
         
-        let html = '能able<thead><tr><th>Username</th><th>Full Name</th><th>Created</th></tr></thead><tbody>';
+        let html = '能able<thead><tr><th>Username</th><th>Full Name</th><th>Created</th><th>Action</th></tr></thead><tbody>';
         for (let u of data.users) {
+            const isCurrentUser = u.id === currentUser.id;
+            const showDelete = (!u.is_admin && !isCurrentUser);
+            
             html += `<tr>
-                <td>${u.username}</td>
-                <td>${u.full_name}${u.is_admin ? ' 👑' : ''}</td>
+                <td>${u.username}${u.is_admin ? ' 👑' : ''}${isCurrentUser ? ' (You)' : ''}</td>
+                <td>${u.full_name}</td>
                 <td>${new Date(u.created_at).toLocaleDateString()}</td>
+                <td>${showDelete ? `<button class="delete-btn" onclick="deleteUser(${u.id}, '${u.username}')">🗑 Delete</button>` : '-'}</td>
             </tr>`;
         }
         html += '</tbody></table>';
         document.getElementById('usersList').innerHTML = html;
+    }
+
+    async function deleteUser(userId, username) {
+        if (confirm(`⚠️ Are you sure you want to delete user "${username}"?\n\nThis will also delete ALL their attendance records!\n\nThis action cannot be undone.`)) {
+            const res = await fetch(`/api/admin/delete-user/${userId}`, {
+                method: 'DELETE',
+                headers: {'Content-Type': 'application/json'}
+            });
+            const data = await res.json();
+            
+            if (res.ok) {
+                alert('✅ ' + data.message);
+                loadUsersList();
+                loadAllAttendance();
+            } else {
+                alert('❌ ' + data.error);
+            }
+        }
     }
 
     async function loadAllAttendance() {
@@ -547,8 +555,8 @@ HTML_TEMPLATE = '''
                 const statusBadge = a.status === 'late' ? '🕐 Late' : '✅ On Time';
                 const checkInLoc = a.check_in_lat ? `${a.check_in_lat.toFixed(4)}, ${a.check_in_lon.toFixed(4)}` : '-';
                 html += `<tr>
-                    <td>${new Date(a.date).toLocaleDateString()}${statusBadge}</td>
-                    <td>${a.user_name}</td>
+                    <td>${new Date(a.date).toLocaleDateString()} ${statusBadge}</td>
+                    <td>${a.user_name}${a.is_admin ? ' 👑' : ''}</td>
                     <td>${a.check_in_time || '-'}</td>
                     <td>${a.check_out_time || '-'}</td>
                     <td>${checkInLoc}</td>
@@ -709,19 +717,16 @@ def check_in():
     today = get_indian_date()
     indian_now = get_indian_time()
     
-    # Check if already checked in today
     existing = Attendance.query.filter_by(user_id=user_id, date=today).first()
     if existing and existing.check_in:
         return jsonify({'error': 'Already checked in today! Please check out first.'}), 400
     
-    # Check location if office set
     office = OfficeLocation.query.first()
     if office and office.latitude and office.latitude != 0:
         dist = calculate_distance(data['latitude'], data['longitude'], office.latitude, office.longitude)
         if dist > office.radius_km:
             return jsonify({'error': f'You are {dist:.2f}km away. Must be within {office.radius_km}km of office.'}), 400
     
-    # Check if late (after 9:30 AM IST)
     is_late = indian_now.hour > 9 or (indian_now.hour == 9 and indian_now.minute > 30)
     
     attendance = Attendance(
@@ -848,17 +853,39 @@ def create_user():
     
     return jsonify({'message': 'User created successfully!'})
 
+@app.route('/api/admin/delete-user/<int:user_id>', methods=['DELETE'])
+@admin_required
+def delete_user(user_id):
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    if user.id == session['user_id']:
+        return jsonify({'error': 'Cannot delete your own account'}), 400
+    
+    if user.is_admin:
+        return jsonify({'error': 'Cannot delete admin users'}), 400
+    
+    Attendance.query.filter_by(user_id=user_id).delete()
+    db.session.delete(user)
+    db.session.commit()
+    
+    return jsonify({'message': f'User {user.username} deleted successfully!'})
+
 @app.route('/api/admin/all-attendance')
 @admin_required
 def all_attendance():
     records = Attendance.query.order_by(Attendance.date.desc()).all()
-    users = {u.id: u.username for u in User.query.all()}
+    users = {u.id: {'username': u.username, 'is_admin': u.is_admin} for u in User.query.all()}
     
     result = []
     for r in records:
+        user_info = users.get(r.user_id, {'username': 'Unknown', 'is_admin': False})
         result.append({
             'date': r.date.isoformat(),
-            'user_name': users.get(r.user_id, 'Unknown'),
+            'user_name': user_info['username'],
+            'is_admin': user_info['is_admin'],
             'check_in_time': r.check_in.strftime('%I:%M %p') if r.check_in else None,
             'check_out_time': r.check_out.strftime('%I:%M %p') if r.check_out else None,
             'check_in_lat': r.check_in_lat,
