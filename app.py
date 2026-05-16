@@ -10,15 +10,18 @@ from flask_sqlalchemy import SQLAlchemy
 from functools import wraps
 import cloudinary
 import cloudinary.uploader
+import cloudinary.api
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-2024'
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload
 
-# ============ CLOUDINARY CONFIGURATION (REPLACE WITH YOUR DETAILS) ============
+# ============ CLOUDINARY CONFIGURATION ============
 cloudinary.config(
-    cloud_name='dx8k7z9m1',             # ← Your actual cloud name
-    api_key='123456789012345',          # ← Your actual API key
-    api_secret='abc123def456ghi789',    # ← Your actual API secret
+    cloud_name='dcjuxpyhg',           # Your cloud name
+    api_key='YOUR_API_KEY',            # Get from Cloudinary Dashboard
+    api_secret='YOUR_API_SECRET',      # Get from Cloudinary Dashboard
+    secure=True
 )
 
 # ============ INDIAN TIMEZONE (IST) ============
@@ -120,7 +123,6 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 def upload_to_cloudinary(image_base64, folder, filename):
     """Upload image to Cloudinary and return URL"""
     try:
-        # Remove data URL prefix if present
         if ',' in image_base64:
             image_base64 = image_base64.split(',')[1]
         
@@ -272,6 +274,7 @@ HTML_TEMPLATE = '''
             border-radius: 12px;
             padding: 10px;
             text-align: center;
+            position: relative;
         }
         .photo-card img {
             width: 100%;
@@ -296,6 +299,17 @@ HTML_TEMPLATE = '''
         .work-tab.active {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
+        }
+        .file-upload-area {
+            border: 2px dashed #667eea;
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+            margin: 20px 0;
+            cursor: pointer;
+        }
+        .file-upload-area:hover {
+            background: #f0f0ff;
         }
         @media (max-width: 600px) {
             .container { padding: 20px; }
@@ -408,6 +422,10 @@ HTML_TEMPLATE = '''
 
     function captureSelfie() {
         const video = document.getElementById('cameraVideo');
+        if (!video || !video.videoWidth) {
+            alert('Camera not ready. Please allow camera access.');
+            return null;
+        }
         const canvas = document.createElement('canvas');
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -430,6 +448,7 @@ HTML_TEMPLATE = '''
             loadAllAttendance();
             loadOfficeLocation();
             loadAllWorkPhotos();
+            loadMediaLibrary();
         } else if (section === 'history') {
             contentDiv.innerHTML = await getHistoryHTML();
         } else if (section === 'workphotos') {
@@ -468,11 +487,16 @@ HTML_TEMPLATE = '''
 
     async function captureForAttendance() {
         capturedSelfie = captureSelfie();
-        document.getElementById('selfieStatus').className = 'message success';
-        document.getElementById('selfieStatus').innerHTML = '✅ Selfie captured! Ready to mark attendance.';
-        setTimeout(() => {
-            document.getElementById('selfieStatus').style.display = 'none';
-        }, 2000);
+        if (capturedSelfie) {
+            document.getElementById('selfieStatus').className = 'message success';
+            document.getElementById('selfieStatus').innerHTML = '✅ Selfie captured! Ready to mark attendance.';
+            setTimeout(() => {
+                document.getElementById('selfieStatus').style.display = 'none';
+            }, 2000);
+        } else {
+            document.getElementById('selfieStatus').className = 'message error';
+            document.getElementById('selfieStatus').innerHTML = '❌ Failed to capture selfie. Please check camera.';
+        }
     }
 
     async function getAdminHTML() {
@@ -501,6 +525,10 @@ HTML_TEMPLATE = '''
             
             <h3>📸 All Work Photos</h3>
             <div id="allWorkPhotosList"></div>
+            
+            <h3>🎨 Media Library (All Photos - Selfies + Work Photos)</h3>
+            <button class="btn-info" onclick="loadMediaLibrary()" style="width: auto; margin-bottom: 10px;">🔄 Refresh Media Library</button>
+            <div id="mediaLibraryGrid" class="photo-grid"></div>
         `;
     }
 
@@ -509,7 +537,7 @@ HTML_TEMPLATE = '''
         const data = await res.json();
         
         if (data.attendance && data.attendance.length > 0) {
-            let html = '能able<thead><tr><th>Date</th><th>Check In</th><th>Check Out</th><th>Check In Location</th><th>Selfie</th></tr></thead><tbody>';
+            let html = '能able<thead><tr><th>Date</th><th>Check In</th><th>Check Out</th><th>Location</th><th>Selfie</th></tr></thead><tbody>';
             for (let a of data.attendance) {
                 const statusBadge = a.status === 'late' ? '🕐 Late' : '✅ On Time';
                 const checkInLoc = a.check_in_lat ? `${a.check_in_lat.toFixed(4)}, ${a.check_in_lon.toFixed(4)}` : '-';
@@ -532,6 +560,8 @@ HTML_TEMPLATE = '''
     function getWorkPhotosHTML() {
         return `
             <h2>📸 Daily Work Photos</h2>
+            <p style="color: #666; margin-bottom: 15px;">Upload photos from your gallery (no camera needed)</p>
+            
             <div class="work-tabs" id="workTabs">
                 <div class="work-tab" onclick="loadWorkPhotosForDay(1)">Day 1</div>
                 <div class="work-tab" onclick="loadWorkPhotosForDay(2)">Day 2</div>
@@ -539,11 +569,13 @@ HTML_TEMPLATE = '''
                 <div class="work-tab" onclick="loadWorkPhotosForDay(4)">Day 4</div>
                 <div class="work-tab" onclick="loadWorkPhotosForDay(5)">Day 5</div>
             </div>
+            
             <div id="workPhotosContainer">
-                <div class="camera-container">
-                    <video id="workCameraVideo" autoplay playsinline></video>
-                    <button class="btn-info" onclick="captureWorkPhoto()">📸 Take Photo</button>
+                <div class="file-upload-area" onclick="document.getElementById('workPhotoInput').click()">
+                    📁 Click here to select photos from gallery
+                    <br><small style="color: #999;">or drag and drop</small>
                 </div>
+                <input type="file" id="workPhotoInput" accept="image/*" multiple style="display:none" onchange="uploadWorkPhotos()">
                 <input type="text" id="photoCaption" placeholder="Work description (optional)">
                 <div id="workPhotosList"></div>
             </div>
@@ -705,56 +737,57 @@ HTML_TEMPLATE = '''
     }
 
     function setupWorkTabs() {
-        setTimeout(() => {
-            const video = document.getElementById('workCameraVideo');
-            if (video && stream) {
-                video.srcObject = stream;
-            } else if (video) {
-                navigator.mediaDevices.getUserMedia({ video: true }).then(s => {
-                    video.srcObject = s;
-                });
-            }
-        }, 100);
+        // No camera needed anymore - just file upload
     }
 
-    async function captureWorkPhoto() {
-        const video = document.getElementById('workCameraVideo');
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const photoData = canvas.toDataURL('image/jpeg', 0.8);
-        
+    async function uploadWorkPhotos() {
+        const fileInput = document.getElementById('workPhotoInput');
+        const files = fileInput.files;
         const caption = document.getElementById('photoCaption').value;
         const activeTab = document.querySelector('.work-tab.active');
-        const day = activeTab ? activeTab.innerText.replace('Day ', '') : '1';
+        const day = activeTab ? parseInt(activeTab.innerText.replace('Day ', '')) : 1;
         
-        const res = await fetch('/api/upload-work-photo', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                photo: photoData,
-                caption: caption,
-                day_number: parseInt(day)
-            })
-        });
-        const data = await res.json();
-        
-        if (res.ok) {
-            document.getElementById('workMsg').className = 'message success';
-            document.getElementById('workMsg').innerHTML = '✅ Photo uploaded!';
-            document.getElementById('photoCaption').value = '';
-            loadWorkPhotosForDay(parseInt(day));
-        } else {
-            document.getElementById('workMsg').className = 'message error';
-            document.getElementById('workMsg').innerHTML = '❌ ' + data.error;
+        if (!files || files.length === 0) {
+            alert('Please select photos');
+            return;
         }
-        setTimeout(() => document.getElementById('workMsg').style.display = 'none', 3000);
+        
+        const msgDiv = document.getElementById('workMsg');
+        
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const reader = new FileReader();
+            
+            await new Promise((resolve) => {
+                reader.onload = async function(e) {
+                    msgDiv.className = 'message info';
+                    msgDiv.innerHTML = `Uploading ${i+1}/${files.length}...`;
+                    
+                    const res = await fetch('/api/upload-work-photo', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            photo: e.target.result,
+                            caption: caption || `Day ${day} work photo`,
+                            day_number: day
+                        })
+                    });
+                    const data = await res.json();
+                    resolve();
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+        
+        msgDiv.className = 'message success';
+        msgDiv.innerHTML = `✅ ${files.length} photo(s) uploaded!`;
+        document.getElementById('photoCaption').value = '';
+        fileInput.value = '';
+        loadWorkPhotosForDay(day);
+        setTimeout(() => msgDiv.style.display = 'none', 3000);
     }
 
     async function loadWorkPhotosForDay(day) {
-        // Update active tab styling
         document.querySelectorAll('.work-tab').forEach((tab, idx) => {
             if (idx + 1 === day) tab.classList.add('active');
             else tab.classList.remove('active');
@@ -778,6 +811,58 @@ HTML_TEMPLATE = '''
             document.getElementById('workPhotosList').innerHTML = html;
         } else {
             document.getElementById('workPhotosList').innerHTML = '<p>No photos uploaded yet for this day.</p>';
+        }
+    }
+
+    async function loadMediaLibrary() {
+        const container = document.getElementById('mediaLibraryGrid');
+        if (!container) return;
+        
+        container.innerHTML = '<div class="info">📸 Loading all photos from Cloudinary...</div>';
+        
+        const res = await fetch('/api/admin/all-media');
+        const data = await res.json();
+        
+        if (data.error) {
+            container.innerHTML = `<div class="error">❌ ${data.error}</div>`;
+            return;
+        }
+        
+        if (data.photos && data.photos.length > 0) {
+            let html = '';
+            for (let p of data.photos) {
+                const date = new Date(p.created_at).toLocaleString();
+                html += `
+                    <div class="photo-card">
+                        <img src="${p.url}" alt="${p.type}">
+                        <div>
+                            <p><strong>${p.type}</strong></p>
+                            <p style="font-size: 11px; color: #666;">${date}</p>
+                            <button onclick="deleteMediaItem('${p.id}')" class="delete-btn">🗑 Delete</button>
+                        </div>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        } else {
+            container.innerHTML = '<p>No photos found in Cloudinary.</p>';
+        }
+    }
+
+    async function deleteMediaItem(publicId) {
+        if (confirm('⚠️ Delete this photo permanently? This action cannot be undone.')) {
+            const res = await fetch(`/api/admin/delete-media/${encodeURIComponent(publicId)}`, {
+                method: 'DELETE'
+            });
+            const data = await res.json();
+            
+            if (res.ok) {
+                alert('✅ Photo deleted!');
+                loadMediaLibrary();
+                loadAllWorkPhotos();
+            } else {
+                alert('❌ ' + data.error);
+            }
         }
     }
 
@@ -813,6 +898,7 @@ HTML_TEMPLATE = '''
             const data = await res.json();
             if (res.ok) {
                 loadAllWorkPhotos();
+                loadMediaLibrary();
             } else {
                 alert('Error: ' + data.error);
             }
@@ -835,7 +921,7 @@ HTML_TEMPLATE = '''
                 <td>${showDelete ? `<button class="delete-btn" onclick="deleteUser(${u.id}, '${u.username}')">🗑 Delete</button>` : '-'}</td>
             </tr>`;
         }
-        html += '</tbody><tr>';
+        html += '</tbody></table>';
         document.getElementById('usersList').innerHTML = html;
     }
 
@@ -1037,7 +1123,6 @@ def check_in():
         if dist > office.radius_km:
             return jsonify({'error': f'You are {dist:.2f}km away. Must be within {office.radius_km}km.'}), 400
     
-    # Upload selfie to Cloudinary
     selfie_url = None
     if data.get('selfie'):
         filename = f"checkin_{user_id}_{indian_now.strftime('%Y%m%d_%H%M%S')}"
@@ -1074,7 +1159,6 @@ def check_out():
     if attendance.check_out:
         return jsonify({'error': 'Already checked out!'}), 400
     
-    # Upload selfie to Cloudinary
     selfie_url = None
     if data.get('selfie'):
         filename = f"checkout_{user_id}_{indian_now.strftime('%Y%m%d_%H%M%S')}"
@@ -1178,6 +1262,67 @@ def upload_work_photo():
     
     return jsonify({'message': 'Photo uploaded!', 'url': photo_url})
 
+@app.route('/api/admin/all-media')
+@admin_required
+def get_all_media():
+    """Get all selfies and work photos from Cloudinary"""
+    try:
+        all_photos = []
+        
+        # Get selfies
+        try:
+            selfies = cloudinary.api.resources(
+                type='upload',
+                prefix='attendance/selfies/',
+                max_results=100
+            )
+            for resource in selfies.get('resources', []):
+                filename = resource['public_id']
+                photo_type = 'Check-in Selfie' if 'checkin' in filename else 'Check-out Selfie' if 'checkout' in filename else 'Selfie'
+                all_photos.append({
+                    'id': resource['public_id'],
+                    'url': resource['secure_url'],
+                    'type': photo_type,
+                    'created_at': resource['created_at'],
+                    'filename': filename
+                })
+        except:
+            pass
+        
+        # Get work photos
+        try:
+            work_photos = cloudinary.api.resources(
+                type='upload',
+                prefix='attendance/work_photos/',
+                max_results=100
+            )
+            for resource in work_photos.get('resources', []):
+                all_photos.append({
+                    'id': resource['public_id'],
+                    'url': resource['secure_url'],
+                    'type': 'Work Photo',
+                    'created_at': resource['created_at'],
+                    'filename': resource['public_id']
+                })
+        except:
+            pass
+        
+        all_photos.sort(key=lambda x: x['created_at'], reverse=True)
+        return jsonify({'photos': all_photos})
+    
+    except Exception as e:
+        return jsonify({'error': str(e), 'photos': []}), 500
+
+@app.route('/api/admin/delete-media/<path:public_id>', methods=['DELETE'])
+@admin_required
+def delete_media(public_id):
+    """Delete a photo from Cloudinary"""
+    try:
+        cloudinary.api.delete_resources([public_id])
+        return jsonify({'message': 'Photo deleted successfully!'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/admin/users')
 @admin_required
 def get_users():
@@ -1222,7 +1367,6 @@ def delete_user(user_id):
     if user.is_admin:
         return jsonify({'error': 'Cannot delete admin'}), 400
     
-    # Delete all related data
     Attendance.query.filter_by(user_id=user_id).delete()
     WorkPhoto.query.filter_by(user_id=user_id).delete()
     db.session.delete(user)
@@ -1263,7 +1407,6 @@ def all_work_photos():
 def delete_work_photo(photo_id):
     photo = WorkPhoto.query.get(photo_id)
     if photo:
-        # Delete from Cloudinary (optional)
         db.session.delete(photo)
         db.session.commit()
         return jsonify({'message': 'Photo deleted!'})
@@ -1309,7 +1452,6 @@ def change_password():
 @app.route('/export')
 @login_required
 def export_data():
-    # Only admin can export
     user = User.query.get(session['user_id'])
     if not user.is_admin:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -1319,7 +1461,7 @@ def export_data():
     
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(['Date', 'Employee', 'Check In Time', 'Check Out Time', 'Check In Latitude', 'Check In Longitude', 'Status'])
+    writer.writerow(['Date', 'Employee', 'Check In Time', 'Check Out Time', 'Latitude', 'Longitude', 'Status'])
     
     for r in records:
         writer.writerow([
