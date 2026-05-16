@@ -1,15 +1,25 @@
 import os
 import hashlib
 import csv
+import base64
 from datetime import datetime, timedelta
 from io import StringIO
 from math import radians, sin, cos, sqrt, atan2
 from flask import Flask, request, jsonify, session, render_template_string, make_response
 from flask_sqlalchemy import SQLAlchemy
 from functools import wraps
+import cloudinary
+import cloudinary.uploader
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-2024'
+
+# ============ CLOUDINARY CONFIGURATION (REPLACE WITH YOUR DETAILS) ============
+cloudinary.config(
+    cloud_name='dx8k7z9m1',             # ← Your actual cloud name
+    api_key='123456789012345',          # ← Your actual API key
+    api_secret='abc123def456ghi789',    # ← Your actual API secret
+)
 
 # ============ INDIAN TIMEZONE (IST) ============
 IST = timedelta(hours=5, minutes=30)
@@ -49,8 +59,20 @@ class Attendance(db.Model):
     check_in_lon = db.Column(db.Float, default=0.0)
     check_out_lat = db.Column(db.Float, default=0.0)
     check_out_lon = db.Column(db.Float, default=0.0)
+    check_in_selfie_url = db.Column(db.Text, nullable=True)
+    check_out_selfie_url = db.Column(db.Text, nullable=True)
     date = db.Column(db.Date, default=get_indian_date)
     status = db.Column(db.String(20), default='present')
+
+class WorkPhoto(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    user_name = db.Column(db.String(100), nullable=True)
+    date = db.Column(db.Date, default=get_indian_date)
+    photo_url = db.Column(db.Text, nullable=False)
+    caption = db.Column(db.String(500), nullable=True)
+    day_number = db.Column(db.Integer, default=1)
+    uploaded_at = db.Column(db.DateTime, default=get_indian_time)
 
 class OfficeLocation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -95,6 +117,24 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     c = 2 * atan2(sqrt(a), sqrt(1-a))
     return R * c
 
+def upload_to_cloudinary(image_base64, folder, filename):
+    """Upload image to Cloudinary and return URL"""
+    try:
+        # Remove data URL prefix if present
+        if ',' in image_base64:
+            image_base64 = image_base64.split(',')[1]
+        
+        upload_result = cloudinary.uploader.upload(
+            f"data:image/jpeg;base64,{image_base64}",
+            folder=f"attendance/{folder}",
+            public_id=filename,
+            overwrite=True
+        )
+        return upload_result['secure_url']
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return None
+
 # ============ HTML TEMPLATE ============
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -102,7 +142,7 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>Attendance System</title>
+    <title>Attendance System Pro</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -125,7 +165,7 @@ HTML_TEMPLATE = '''
         }
         h2 { color: #333; margin-bottom: 25px; text-align: center; font-size: 24px; }
         h3 { color: #555; margin: 20px 0 10px 0; font-size: 18px; }
-        input {
+        input, select, textarea {
             width: 100%;
             padding: 14px;
             margin: 10px 0;
@@ -210,10 +250,58 @@ HTML_TEMPLATE = '''
         .error { background: #f8d7da; color: #721c24; display: block; }
         .info { background: #d1ecf1; color: #0c5460; display: block; }
         .delete-btn { background: #dc3545; padding: 5px 10px; font-size: 12px; width: auto; margin: 0; }
+        .camera-container {
+            text-align: center;
+            margin: 15px 0;
+        }
+        video {
+            width: 100%;
+            max-width: 300px;
+            border-radius: 15px;
+            border: 3px solid #667eea;
+            margin-bottom: 10px;
+        }
+        .photo-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .photo-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 10px;
+            text-align: center;
+        }
+        .photo-card img {
+            width: 100%;
+            height: 150px;
+            object-fit: cover;
+            border-radius: 8px;
+        }
+        .work-tabs {
+            display: flex;
+            gap: 5px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .work-tab {
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            cursor: pointer;
+        }
+        .work-tab.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
         @media (max-width: 600px) {
             .container { padding: 20px; }
             .nav-buttons button { font-size: 12px; padding: 8px; }
             th, td { font-size: 11px; padding: 8px; }
+            .work-tab { font-size: 12px; }
         }
     </style>
 </head>
@@ -221,7 +309,7 @@ HTML_TEMPLATE = '''
 <div id="app">
     <!-- LOGIN PAGE -->
     <div id="loginPage" class="container login-container">
-        <h2>📋 Attendance System</h2>
+        <h2>📋 Attendance System Pro</h2>
         <input type="text" id="loginUsername" placeholder="Username" autocomplete="off">
         <input type="password" id="loginPassword" placeholder="Password">
         <button onclick="doLogin()">Login</button>
@@ -238,8 +326,9 @@ HTML_TEMPLATE = '''
                 <button onclick="showSection('dashboard')">📊 Dashboard</button>
                 <button id="adminBtn" onclick="showSection('admin')" style="display:none;">👑 Admin</button>
                 <button onclick="showSection('history')">📜 History</button>
+                <button onclick="showSection('workphotos')">📸 Work Photos</button>
                 <button onclick="showSection('settings')">⚙️ Settings</button>
-                <button class="btn-info" onclick="exportData()">📥 Export Excel</button>
+                <button id="exportBtn" onclick="exportData()" style="display:none;">📥 Export Excel</button>
                 <button class="btn-danger" onclick="logout()">🚪 Logout</button>
             </div>
             <div id="mainContent"></div>
@@ -249,6 +338,8 @@ HTML_TEMPLATE = '''
 
 <script>
     let currentUser = null;
+    let stream = null;
+    let capturedSelfie = null;
 
     async function doLogin() {
         const username = document.getElementById('loginUsername').value;
@@ -283,6 +374,7 @@ HTML_TEMPLATE = '''
         
         if (currentUser.is_admin) {
             document.getElementById('adminBtn').style.display = 'inline-block';
+            document.getElementById('exportBtn').style.display = 'inline-block';
         }
         showSection('dashboard');
     }
@@ -301,6 +393,29 @@ HTML_TEMPLATE = '''
         });
     }
 
+    async function startCamera() {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            const video = document.getElementById('cameraVideo');
+            if (video) video.srcObject = stream;
+        } catch(err) {
+            console.error('Camera error:', err);
+        }
+    }
+
+    function captureSelfie() {
+        const video = document.getElementById('cameraVideo');
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/jpeg', 0.8);
+    }
+
     async function loadContent(section) {
         const contentDiv = document.getElementById('mainContent');
         
@@ -308,13 +423,19 @@ HTML_TEMPLATE = '''
             contentDiv.innerHTML = await getDashboardHTML();
             updateLocation();
             loadStats();
+            startCamera();
         } else if (section === 'admin') {
             contentDiv.innerHTML = await getAdminHTML();
             loadUsersList();
             loadAllAttendance();
             loadOfficeLocation();
+            loadAllWorkPhotos();
         } else if (section === 'history') {
             contentDiv.innerHTML = await getHistoryHTML();
+        } else if (section === 'workphotos') {
+            contentDiv.innerHTML = getWorkPhotosHTML();
+            setupWorkTabs();
+            loadWorkPhotosForDay(1);
         } else if (section === 'settings') {
             contentDiv.innerHTML = getSettingsHTML();
         }
@@ -330,12 +451,28 @@ HTML_TEMPLATE = '''
                 <div class="stat-card"><div class="number" id="monthCount">0</div><div class="label">Days Present</div></div>
             </div>
             <div id="locationStatus" class="location-box">📍 Getting location...</div>
+            
+            <div class="camera-container">
+                <video id="cameraVideo" autoplay playsinline></video>
+                <button class="btn-info" onclick="captureForAttendance()">📸 Take Selfie</button>
+            </div>
+            <div id="selfieStatus" class="message"></div>
+            
             <div style="display: flex; gap: 10px;">
                 <button id="checkInBtn" class="btn-success" onclick="markCheckIn()" style="flex:1;">✅ Check In</button>
                 <button id="checkOutBtn" class="btn-warning" onclick="markCheckOut()" style="flex:1; display:none;">🔚 Check Out</button>
             </div>
             <div id="attMsg" class="message"></div>
         `;
+    }
+
+    async function captureForAttendance() {
+        capturedSelfie = captureSelfie();
+        document.getElementById('selfieStatus').className = 'message success';
+        document.getElementById('selfieStatus').innerHTML = '✅ Selfie captured! Ready to mark attendance.';
+        setTimeout(() => {
+            document.getElementById('selfieStatus').style.display = 'none';
+        }, 2000);
     }
 
     async function getAdminHTML() {
@@ -361,6 +498,9 @@ HTML_TEMPLATE = '''
             
             <h3>📅 All Attendance Records</h3>
             <div id="allAttendanceTable"></div>
+            
+            <h3>📸 All Work Photos</h3>
+            <div id="allWorkPhotosList"></div>
         `;
     }
 
@@ -369,18 +509,17 @@ HTML_TEMPLATE = '''
         const data = await res.json();
         
         if (data.attendance && data.attendance.length > 0) {
-            let html = '能able<thead><tr><th>Date</th><th>Check In</th><th>Check Out</th><th>Check In Location</th><th>Check Out Location</th><th>Status</th></tr></thead><tbody>';
+            let html = '能able<thead><tr><th>Date</th><th>Check In</th><th>Check Out</th><th>Check In Location</th><th>Selfie</th></tr></thead><tbody>';
             for (let a of data.attendance) {
                 const statusBadge = a.status === 'late' ? '🕐 Late' : '✅ On Time';
                 const checkInLoc = a.check_in_lat ? `${a.check_in_lat.toFixed(4)}, ${a.check_in_lon.toFixed(4)}` : '-';
-                const checkOutLoc = a.check_out_lat ? `${a.check_out_lat.toFixed(4)}, ${a.check_out_lon.toFixed(4)}` : '-';
+                const selfieImg = a.selfie_url ? `<a href="${a.selfie_url}" target="_blank">📸 View</a>` : '-';
                 html += `<tr>
-                    <td>${new Date(a.date).toLocaleDateString()}</td>
+                    <td>${new Date(a.date).toLocaleDateString()} ${statusBadge}</td>
                     <td>${a.check_in_time || '-'}</td>
                     <td>${a.check_out_time || '-'}</td>
                     <td>${checkInLoc}</td>
-                    <td>${checkOutLoc}</td>
-                    <td>${statusBadge}</td>
+                    <td>${selfieImg}</td>
                 </tr>`;
             }
             html += '</tbody></table>';
@@ -390,16 +529,46 @@ HTML_TEMPLATE = '''
         }
     }
 
-    function getSettingsHTML() {
+    function getWorkPhotosHTML() {
         return `
-            <h2>⚙️ Settings</h2>
-            <h3>Change Password</h3>
-            <input type="password" id="oldPassword" placeholder="Current Password">
-            <input type="password" id="newPassword1" placeholder="New Password">
-            <input type="password" id="newPassword2" placeholder="Confirm Password">
-            <button onclick="changePassword()">Update Password</button>
-            <div id="settingsMsg" class="message"></div>
+            <h2>📸 Daily Work Photos</h2>
+            <div class="work-tabs" id="workTabs">
+                <div class="work-tab" onclick="loadWorkPhotosForDay(1)">Day 1</div>
+                <div class="work-tab" onclick="loadWorkPhotosForDay(2)">Day 2</div>
+                <div class="work-tab" onclick="loadWorkPhotosForDay(3)">Day 3</div>
+                <div class="work-tab" onclick="loadWorkPhotosForDay(4)">Day 4</div>
+                <div class="work-tab" onclick="loadWorkPhotosForDay(5)">Day 5</div>
+            </div>
+            <div id="workPhotosContainer">
+                <div class="camera-container">
+                    <video id="workCameraVideo" autoplay playsinline></video>
+                    <button class="btn-info" onclick="captureWorkPhoto()">📸 Take Photo</button>
+                </div>
+                <input type="text" id="photoCaption" placeholder="Work description (optional)">
+                <div id="workPhotosList"></div>
+            </div>
+            <div id="workMsg" class="message"></div>
         `;
+    }
+
+    function getSettingsHTML() {
+        if (currentUser.is_admin) {
+            return `
+                <h2>⚙️ Admin Settings</h2>
+                <h3>Change Password</h3>
+                <input type="password" id="oldPassword" placeholder="Current Password">
+                <input type="password" id="newPassword1" placeholder="New Password">
+                <input type="password" id="newPassword2" placeholder="Confirm Password">
+                <button onclick="changePassword()">Update Password</button>
+                <div id="settingsMsg" class="message"></div>
+            `;
+        } else {
+            return `
+                <h2>⚙️ Settings</h2>
+                <p>Password changes are managed by your administrator.</p>
+                <p>Contact admin to reset your password.</p>
+            `;
+        }
     }
 
     async function updateLocation() {
@@ -438,9 +607,16 @@ HTML_TEMPLATE = '''
     }
 
     async function markCheckIn() {
+        if (!capturedSelfie) {
+            document.getElementById('attMsg').className = 'message error';
+            document.getElementById('attMsg').innerHTML = '❌ Please take a selfie first!';
+            setTimeout(() => document.getElementById('attMsg').style.display = 'none', 3000);
+            return;
+        }
+        
         const msgDiv = document.getElementById('attMsg');
         msgDiv.className = 'message info';
-        msgDiv.innerHTML = '📍 Getting your location...';
+        msgDiv.innerHTML = '📍 Getting location...';
         
         try {
             const loc = await getLocation();
@@ -449,17 +625,24 @@ HTML_TEMPLATE = '''
                 msgDiv.innerHTML = '❌ Please enable location access';
                 return;
             }
-            msgDiv.innerHTML = '✅ Submitting check-in...';
+            msgDiv.innerHTML = '✅ Submitting check-in with selfie...';
+            
             const res = await fetch('/api/check-in', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({latitude: loc.lat, longitude: loc.lon})
+                body: JSON.stringify({
+                    latitude: loc.lat,
+                    longitude: loc.lon,
+                    selfie: capturedSelfie
+                })
             });
             const data = await res.json();
             
             if (res.ok) {
                 msgDiv.className = 'message success';
                 msgDiv.innerHTML = '✅ ' + data.message;
+                capturedSelfie = null;
+                document.getElementById('selfieStatus').style.display = 'none';
                 loadStats();
             } else {
                 msgDiv.className = 'message error';
@@ -473,9 +656,16 @@ HTML_TEMPLATE = '''
     }
 
     async function markCheckOut() {
+        if (!capturedSelfie) {
+            document.getElementById('attMsg').className = 'message error';
+            document.getElementById('attMsg').innerHTML = '❌ Please take a selfie first!';
+            setTimeout(() => document.getElementById('attMsg').style.display = 'none', 3000);
+            return;
+        }
+        
         const msgDiv = document.getElementById('attMsg');
         msgDiv.className = 'message info';
-        msgDiv.innerHTML = '📍 Getting your location...';
+        msgDiv.innerHTML = '📍 Getting location...';
         
         try {
             const loc = await getLocation();
@@ -484,17 +674,24 @@ HTML_TEMPLATE = '''
                 msgDiv.innerHTML = '❌ Please enable location access';
                 return;
             }
-            msgDiv.innerHTML = '✅ Submitting check-out...';
+            msgDiv.innerHTML = '✅ Submitting check-out with selfie...';
+            
             const res = await fetch('/api/check-out', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({latitude: loc.lat, longitude: loc.lon})
+                body: JSON.stringify({
+                    latitude: loc.lat,
+                    longitude: loc.lon,
+                    selfie: capturedSelfie
+                })
             });
             const data = await res.json();
             
             if (res.ok) {
                 msgDiv.className = 'message success';
                 msgDiv.innerHTML = '✅ ' + data.message;
+                capturedSelfie = null;
+                document.getElementById('selfieStatus').style.display = 'none';
                 loadStats();
             } else {
                 msgDiv.className = 'message error';
@@ -505,6 +702,121 @@ HTML_TEMPLATE = '''
             msgDiv.innerHTML = '❌ ' + e;
         }
         setTimeout(() => msgDiv.style.display = 'none', 5000);
+    }
+
+    function setupWorkTabs() {
+        setTimeout(() => {
+            const video = document.getElementById('workCameraVideo');
+            if (video && stream) {
+                video.srcObject = stream;
+            } else if (video) {
+                navigator.mediaDevices.getUserMedia({ video: true }).then(s => {
+                    video.srcObject = s;
+                });
+            }
+        }, 100);
+    }
+
+    async function captureWorkPhoto() {
+        const video = document.getElementById('workCameraVideo');
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const photoData = canvas.toDataURL('image/jpeg', 0.8);
+        
+        const caption = document.getElementById('photoCaption').value;
+        const activeTab = document.querySelector('.work-tab.active');
+        const day = activeTab ? activeTab.innerText.replace('Day ', '') : '1';
+        
+        const res = await fetch('/api/upload-work-photo', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                photo: photoData,
+                caption: caption,
+                day_number: parseInt(day)
+            })
+        });
+        const data = await res.json();
+        
+        if (res.ok) {
+            document.getElementById('workMsg').className = 'message success';
+            document.getElementById('workMsg').innerHTML = '✅ Photo uploaded!';
+            document.getElementById('photoCaption').value = '';
+            loadWorkPhotosForDay(parseInt(day));
+        } else {
+            document.getElementById('workMsg').className = 'message error';
+            document.getElementById('workMsg').innerHTML = '❌ ' + data.error;
+        }
+        setTimeout(() => document.getElementById('workMsg').style.display = 'none', 3000);
+    }
+
+    async function loadWorkPhotosForDay(day) {
+        // Update active tab styling
+        document.querySelectorAll('.work-tab').forEach((tab, idx) => {
+            if (idx + 1 === day) tab.classList.add('active');
+            else tab.classList.remove('active');
+        });
+        
+        const res = await fetch(`/api/work-photos/${day}`);
+        const data = await res.json();
+        
+        if (data.photos && data.photos.length > 0) {
+            let html = '<div class="photo-grid">';
+            for (let p of data.photos) {
+                html += `
+                    <div class="photo-card">
+                        <img src="${p.photo_url}" alt="Work photo">
+                        <p><strong>${new Date(p.uploaded_at).toLocaleString()}</strong></p>
+                        <p>${p.caption || 'No description'}</p>
+                    </div>
+                `;
+            }
+            html += '</div>';
+            document.getElementById('workPhotosList').innerHTML = html;
+        } else {
+            document.getElementById('workPhotosList').innerHTML = '<p>No photos uploaded yet for this day.</p>';
+        }
+    }
+
+    async function loadAllWorkPhotos() {
+        const res = await fetch('/api/admin/all-work-photos');
+        const data = await res.json();
+        
+        if (data.photos && data.photos.length > 0) {
+            let html = '<div class="photo-grid">';
+            for (let p of data.photos) {
+                html += `
+                    <div class="photo-card">
+                        <img src="${p.photo_url}" alt="Work photo">
+                        <p><strong>${p.user_name}</strong> - Day ${p.day_number}</p>
+                        <p>${new Date(p.uploaded_at).toLocaleString()}</p>
+                        <p>${p.caption || 'No description'}</p>
+                        <button class="delete-btn" onclick="deleteWorkPhoto(${p.id})">🗑 Delete</button>
+                    </div>
+                `;
+            }
+            html += '</div>';
+            document.getElementById('allWorkPhotosList').innerHTML = html;
+        } else {
+            document.getElementById('allWorkPhotosList').innerHTML = '<p>No work photos uploaded yet.</p>';
+        }
+    }
+
+    async function deleteWorkPhoto(photoId) {
+        if (confirm('Delete this photo?')) {
+            const res = await fetch(`/api/admin/delete-work-photo/${photoId}`, {
+                method: 'DELETE'
+            });
+            const data = await res.json();
+            if (res.ok) {
+                loadAllWorkPhotos();
+            } else {
+                alert('Error: ' + data.error);
+            }
+        }
     }
 
     async function loadUsersList() {
@@ -523,18 +835,16 @@ HTML_TEMPLATE = '''
                 <td>${showDelete ? `<button class="delete-btn" onclick="deleteUser(${u.id}, '${u.username}')">🗑 Delete</button>` : '-'}</td>
             </tr>`;
         }
-        html += '</tbody></table>';
+        html += '</tbody><tr>';
         document.getElementById('usersList').innerHTML = html;
     }
 
     async function deleteUser(userId, username) {
-        if (confirm(`⚠️ Are you sure you want to delete user "${username}"?\n\nThis will also delete ALL their attendance records!\n\nThis action cannot be undone.`)) {
+        if (confirm(`⚠️ Delete user "${username}"? This deletes ALL their data!`)) {
             const res = await fetch(`/api/admin/delete-user/${userId}`, {
-                method: 'DELETE',
-                headers: {'Content-Type': 'application/json'}
+                method: 'DELETE'
             });
             const data = await res.json();
-            
             if (res.ok) {
                 alert('✅ ' + data.message);
                 loadUsersList();
@@ -550,16 +860,16 @@ HTML_TEMPLATE = '''
         const data = await res.json();
         
         if (data.attendance && data.attendance.length > 0) {
-            let html = '能able<thead><tr><th>Date</th><th>User</th><th>Check In</th><th>Check Out</th><th>Check In Location</th></tr></thead><tbody>';
+            let html = '能able<thead><tr><th>Date</th><th>User</th><th>Check In</th><th>Check Out</th><th>Location</th><th>Selfie</th></tr></thead><tbody>';
             for (let a of data.attendance) {
-                const statusBadge = a.status === 'late' ? '🕐 Late' : '✅ On Time';
-                const checkInLoc = a.check_in_lat ? `${a.check_in_lat.toFixed(4)}, ${a.check_in_lon.toFixed(4)}` : '-';
+                const selfieLink = a.selfie_url ? `<a href="${a.selfie_url}" target="_blank">📸</a>` : '-';
                 html += `<tr>
-                    <td>${new Date(a.date).toLocaleDateString()} ${statusBadge}</td>
+                    <td>${new Date(a.date).toLocaleDateString()} ${a.status === 'late' ? '🕐 Late' : '✅'}</td>
                     <td>${a.user_name}${a.is_admin ? ' 👑' : ''}</td>
                     <td>${a.check_in_time || '-'}</td>
                     <td>${a.check_out_time || '-'}</td>
-                    <td>${checkInLoc}</td>
+                    <td>${a.check_in_lat?.toFixed(4) || '-'}</td>
+                    <td>${selfieLink}</td>
                 </tr>`;
             }
             html += '</tbody></table>';
@@ -719,13 +1029,19 @@ def check_in():
     
     existing = Attendance.query.filter_by(user_id=user_id, date=today).first()
     if existing and existing.check_in:
-        return jsonify({'error': 'Already checked in today! Please check out first.'}), 400
+        return jsonify({'error': 'Already checked in today!'}), 400
     
     office = OfficeLocation.query.first()
     if office and office.latitude and office.latitude != 0:
         dist = calculate_distance(data['latitude'], data['longitude'], office.latitude, office.longitude)
         if dist > office.radius_km:
-            return jsonify({'error': f'You are {dist:.2f}km away. Must be within {office.radius_km}km of office.'}), 400
+            return jsonify({'error': f'You are {dist:.2f}km away. Must be within {office.radius_km}km.'}), 400
+    
+    # Upload selfie to Cloudinary
+    selfie_url = None
+    if data.get('selfie'):
+        filename = f"checkin_{user_id}_{indian_now.strftime('%Y%m%d_%H%M%S')}"
+        selfie_url = upload_to_cloudinary(data['selfie'], 'selfies', filename)
     
     is_late = indian_now.hour > 9 or (indian_now.hour == 9 and indian_now.minute > 30)
     
@@ -735,12 +1051,13 @@ def check_in():
         check_in_lat=data['latitude'],
         check_in_lon=data['longitude'],
         date=today,
+        check_in_selfie_url=selfie_url,
         status='late' if is_late else 'present'
     )
     db.session.add(attendance)
     db.session.commit()
     
-    return jsonify({'message': f'Checked in at {indian_now.strftime("%I:%M %p")} IST!'})
+    return jsonify({'message': f'Checked in at {indian_now.strftime("%I:%M %p")} IST with selfie!'})
 
 @app.route('/api/check-out', methods=['POST'])
 @login_required
@@ -752,17 +1069,24 @@ def check_out():
     
     attendance = Attendance.query.filter_by(user_id=user_id, date=today).first()
     if not attendance or not attendance.check_in:
-        return jsonify({'error': 'No check-in found for today!'}), 400
+        return jsonify({'error': 'No check-in found!'}), 400
     
     if attendance.check_out:
-        return jsonify({'error': 'Already checked out today!'}), 400
+        return jsonify({'error': 'Already checked out!'}), 400
+    
+    # Upload selfie to Cloudinary
+    selfie_url = None
+    if data.get('selfie'):
+        filename = f"checkout_{user_id}_{indian_now.strftime('%Y%m%d_%H%M%S')}"
+        selfie_url = upload_to_cloudinary(data['selfie'], 'selfies', filename)
     
     attendance.check_out = indian_now
     attendance.check_out_lat = data['latitude']
     attendance.check_out_lon = data['longitude']
+    attendance.check_out_selfie_url = selfie_url
     db.session.commit()
     
-    return jsonify({'message': f'Checked out at {indian_now.strftime("%I:%M %p")} IST!'})
+    return jsonify({'message': f'Checked out at {indian_now.strftime("%I:%M %p")} IST with selfie!'})
 
 @app.route('/api/today-status')
 @login_required
@@ -814,11 +1138,45 @@ def my_attendance():
             'check_out_time': r.check_out.strftime('%I:%M %p') if r.check_out else None,
             'check_in_lat': r.check_in_lat,
             'check_in_lon': r.check_in_lon,
-            'check_out_lat': r.check_out_lat,
-            'check_out_lon': r.check_out_lon,
+            'selfie_url': r.check_in_selfie_url,
             'status': r.status
         })
     return jsonify({'attendance': result})
+
+@app.route('/api/work-photos/<int:day_number>')
+@login_required
+def get_work_photos(day_number):
+    user_id = session['user_id']
+    today = get_indian_date()
+    photos = WorkPhoto.query.filter_by(user_id=user_id, date=today, day_number=day_number).order_by(WorkPhoto.uploaded_at.desc()).all()
+    return jsonify({'photos': [{'id': p.id, 'photo_url': p.photo_url, 'caption': p.caption, 'uploaded_at': p.uploaded_at.isoformat()} for p in photos]})
+
+@app.route('/api/upload-work-photo', methods=['POST'])
+@login_required
+def upload_work_photo():
+    data = request.json
+    user_id = session['user_id']
+    user = User.query.get(user_id)
+    today = get_indian_date()
+    
+    filename = f"work_{user_id}_{today}_day{data['day_number']}_{datetime.now().strftime('%H%M%S')}"
+    photo_url = upload_to_cloudinary(data['photo'], f'work_photos/user_{user_id}', filename)
+    
+    if not photo_url:
+        return jsonify({'error': 'Upload failed'}), 500
+    
+    work_photo = WorkPhoto(
+        user_id=user_id,
+        user_name=user.full_name,
+        date=today,
+        photo_url=photo_url,
+        caption=data.get('caption', ''),
+        day_number=data['day_number']
+    )
+    db.session.add(work_photo)
+    db.session.commit()
+    
+    return jsonify({'message': 'Photo uploaded!', 'url': photo_url})
 
 @app.route('/api/admin/users')
 @admin_required
@@ -840,7 +1198,7 @@ def create_user():
     data = request.json
     
     if User.query.filter_by(username=data['username']).first():
-        return jsonify({'error': 'Username already exists'}), 400
+        return jsonify({'error': 'Username exists'}), 400
     
     user = User(
         username=data['username'],
@@ -851,27 +1209,26 @@ def create_user():
     db.session.add(user)
     db.session.commit()
     
-    return jsonify({'message': 'User created successfully!'})
+    return jsonify({'message': 'User created!'})
 
 @app.route('/api/admin/delete-user/<int:user_id>', methods=['DELETE'])
 @admin_required
 def delete_user(user_id):
     user = User.query.get(user_id)
-    
     if not user:
         return jsonify({'error': 'User not found'}), 404
-    
     if user.id == session['user_id']:
-        return jsonify({'error': 'Cannot delete your own account'}), 400
-    
+        return jsonify({'error': 'Cannot delete yourself'}), 400
     if user.is_admin:
-        return jsonify({'error': 'Cannot delete admin users'}), 400
+        return jsonify({'error': 'Cannot delete admin'}), 400
     
+    # Delete all related data
     Attendance.query.filter_by(user_id=user_id).delete()
+    WorkPhoto.query.filter_by(user_id=user_id).delete()
     db.session.delete(user)
     db.session.commit()
     
-    return jsonify({'message': f'User {user.username} deleted successfully!'})
+    return jsonify({'message': f'User {user.username} deleted!'})
 
 @app.route('/api/admin/all-attendance')
 @admin_required
@@ -890,9 +1247,27 @@ def all_attendance():
             'check_out_time': r.check_out.strftime('%I:%M %p') if r.check_out else None,
             'check_in_lat': r.check_in_lat,
             'check_in_lon': r.check_in_lon,
+            'selfie_url': r.check_in_selfie_url,
             'status': r.status
         })
     return jsonify({'attendance': result})
+
+@app.route('/api/admin/all-work-photos')
+@admin_required
+def all_work_photos():
+    photos = WorkPhoto.query.order_by(WorkPhoto.uploaded_at.desc()).all()
+    return jsonify({'photos': [{'id': p.id, 'user_name': p.user_name, 'photo_url': p.photo_url, 'caption': p.caption, 'day_number': p.day_number, 'uploaded_at': p.uploaded_at.isoformat()} for p in photos]})
+
+@app.route('/api/admin/delete-work-photo/<int:photo_id>', methods=['DELETE'])
+@admin_required
+def delete_work_photo(photo_id):
+    photo = WorkPhoto.query.get(photo_id)
+    if photo:
+        # Delete from Cloudinary (optional)
+        db.session.delete(photo)
+        db.session.commit()
+        return jsonify({'message': 'Photo deleted!'})
+    return jsonify({'error': 'Not found'}), 404
 
 @app.route('/api/admin/set-location', methods=['POST'])
 @admin_required
@@ -925,7 +1300,7 @@ def change_password():
     user = User.query.get(session['user_id'])
     
     if not check_password(data['old_password'], user.password):
-        return jsonify({'error': 'Current password is incorrect'}), 400
+        return jsonify({'error': 'Current password incorrect'}), 400
     
     user.password = hash_password(data['new_password'])
     db.session.commit()
@@ -934,6 +1309,11 @@ def change_password():
 @app.route('/export')
 @login_required
 def export_data():
+    # Only admin can export
+    user = User.query.get(session['user_id'])
+    if not user.is_admin:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
     records = Attendance.query.order_by(Attendance.date.desc()).all()
     users = {u.id: u.username for u in User.query.all()}
     
