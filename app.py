@@ -18,9 +18,9 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload
 
 # ============ CLOUDINARY CONFIGURATION ============
 cloudinary.config(
-    cloud_name='dcjuxpyhg',           # Your cloud name
-    api_key='YOUR_API_KEY',            # Get from Cloudinary Dashboard
-    api_secret='YOUR_API_SECRET',      # Get from Cloudinary Dashboard
+    cloud_name='dcjuxpyhg',
+    api_key='871541737719581',
+    api_secret='IUlvxP2j6OA-kovlx5EsDdzWZmc',
     secure=True
 )
 
