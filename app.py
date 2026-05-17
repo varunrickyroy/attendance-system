@@ -83,6 +83,14 @@ class OfficeLocation(db.Model):
     longitude = db.Column(db.Float, default=0.0)
     radius_km = db.Column(db.Float, default=0.5)
 
+class LocationTrack(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    attendance_id = db.Column(db.Integer, nullable=False)
+    latitude = db.Column(db.Float, nullable=False)
+    longitude = db.Column(db.Float, nullable=False)
+    timestamp = db.Column(db.DateTime, default=get_indian_time)
+    accuracy = db.Column(db.Float, default=0.0)
 # ============ HELPER FUNCTIONS ============
 def hash_password(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
