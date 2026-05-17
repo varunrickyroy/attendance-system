@@ -14,7 +14,7 @@ import cloudinary.api
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-2024'
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 # ============ CLOUDINARY CONFIGURATION ============
 cloudinary.config(
@@ -67,6 +67,15 @@ class Attendance(db.Model):
     date = db.Column(db.Date, default=get_indian_date)
     status = db.Column(db.String(20), default='present')
 
+class LocationTrack(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    attendance_id = db.Column(db.Integer, nullable=False)
+    latitude = db.Column(db.Float, nullable=False)
+    longitude = db.Column(db.Float, nullable=False)
+    timestamp = db.Column(db.DateTime, default=get_indian_time)
+    accuracy = db.Column(db.Float, default=0.0)
+
 class WorkPhoto(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, nullable=False)
@@ -83,14 +92,6 @@ class OfficeLocation(db.Model):
     longitude = db.Column(db.Float, default=0.0)
     radius_km = db.Column(db.Float, default=0.5)
 
-class LocationTrack(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, nullable=False)
-    attendance_id = db.Column(db.Integer, nullable=False)
-    latitude = db.Column(db.Float, nullable=False)
-    longitude = db.Column(db.Float, nullable=False)
-    timestamp = db.Column(db.DateTime, default=get_indian_time)
-    accuracy = db.Column(db.Float, default=0.0)
 # ============ HELPER FUNCTIONS ============
 def hash_password(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
@@ -129,11 +130,9 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 def upload_to_cloudinary(image_base64, folder, filename):
-    """Upload image to Cloudinary and return URL"""
     try:
         if ',' in image_base64:
             image_base64 = image_base64.split(',')[1]
-        
         upload_result = cloudinary.uploader.upload(
             f"data:image/jpeg;base64,{image_base64}",
             folder=f"attendance/{folder}",
@@ -362,6 +361,8 @@ HTML_TEMPLATE = '''
     let currentUser = null;
     let stream = null;
     let capturedSelfie = null;
+    let locationTrackingInterval = null;
+    let currentAttendanceId = null;
 
     async function doLogin() {
         const username = document.getElementById('loginUsername').value;
@@ -409,7 +410,7 @@ HTML_TEMPLATE = '''
         return new Promise((resolve, reject) => {
             if (!navigator.geolocation) reject('Not supported');
             navigator.geolocation.getCurrentPosition(
-                pos => resolve({lat: pos.coords.latitude, lon: pos.coords.longitude}),
+                pos => resolve({lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy}),
                 err => reject('Please enable location')
             );
         });
@@ -442,6 +443,44 @@ HTML_TEMPLATE = '''
         return canvas.toDataURL('image/jpeg', 0.8);
     }
 
+    // ============ LIVE LOCATION TRACKING ============
+    function startLocationTracking(attendanceId) {
+        currentAttendanceId = attendanceId;
+        if (locationTrackingInterval) clearInterval(locationTrackingInterval);
+        locationTrackingInterval = setInterval(() => {
+            sendLocationUpdate();
+        }, 30000);
+    }
+
+    function stopLocationTracking() {
+        if (locationTrackingInterval) {
+            clearInterval(locationTrackingInterval);
+            locationTrackingInterval = null;
+        }
+        currentAttendanceId = null;
+    }
+
+    async function sendLocationUpdate() {
+        if (!currentAttendanceId) return;
+        try {
+            const loc = await getLocation();
+            if (loc) {
+                await fetch('/api/update-location', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        attendance_id: currentAttendanceId,
+                        latitude: loc.lat,
+                        longitude: loc.lon,
+                        accuracy: loc.accuracy || 0
+                    })
+                });
+            }
+        } catch(e) {
+            console.log('Location update failed:', e);
+        }
+    }
+
     async function loadContent(section) {
         const contentDiv = document.getElementById('mainContent');
         
@@ -457,6 +496,7 @@ HTML_TEMPLATE = '''
             loadOfficeLocation();
             loadAllWorkPhotos();
             loadMediaLibrary();
+            loadUsersForTracking();
         } else if (section === 'history') {
             contentDiv.innerHTML = await getHistoryHTML();
         } else if (section === 'workphotos') {
@@ -534,9 +574,17 @@ HTML_TEMPLATE = '''
             <h3>📸 All Work Photos</h3>
             <div id="allWorkPhotosList"></div>
             
-            <h3>🎨 Media Library (All Photos - Selfies + Work Photos)</h3>
+            <h3>🎨 Media Library (All Photos)</h3>
             <button class="btn-info" onclick="loadMediaLibrary()" style="width: auto; margin-bottom: 10px;">🔄 Refresh Media Library</button>
             <div id="mediaLibraryGrid" class="photo-grid"></div>
+            
+            <h3>🗺️ User Location History (Live Tracking)</h3>
+            <select id="trackUserSelect" onchange="loadUserRoute()">
+                <option value="">Select User</option>
+            </select>
+            <input type="date" id="trackDate" onchange="loadUserRoute()">
+            <button onclick="loadUserRoute()">View Route</button>
+            <div id="locationTable"></div>
         `;
     }
 
@@ -665,7 +713,7 @@ HTML_TEMPLATE = '''
                 msgDiv.innerHTML = '❌ Please enable location access';
                 return;
             }
-            msgDiv.innerHTML = '✅ Submitting check-in with selfie...';
+            msgDiv.innerHTML = '✅ Submitting check-in...';
             
             const res = await fetch('/api/check-in', {
                 method: 'POST',
@@ -681,6 +729,11 @@ HTML_TEMPLATE = '''
             if (res.ok) {
                 msgDiv.className = 'message success';
                 msgDiv.innerHTML = '✅ ' + data.message;
+                
+                if (data.attendance_id) {
+                    startLocationTracking(data.attendance_id);
+                }
+                
                 capturedSelfie = null;
                 document.getElementById('selfieStatus').style.display = 'none';
                 loadStats();
@@ -705,7 +758,11 @@ HTML_TEMPLATE = '''
         
         const msgDiv = document.getElementById('attMsg');
         msgDiv.className = 'message info';
-        msgDiv.innerHTML = '📍 Getting location...';
+        msgDiv.innerHTML = '📍 Getting final location...';
+        
+        if (currentAttendanceId) {
+            await sendLocationUpdate();
+        }
         
         try {
             const loc = await getLocation();
@@ -714,7 +771,7 @@ HTML_TEMPLATE = '''
                 msgDiv.innerHTML = '❌ Please enable location access';
                 return;
             }
-            msgDiv.innerHTML = '✅ Submitting check-out with selfie...';
+            msgDiv.innerHTML = '✅ Submitting check-out...';
             
             const res = await fetch('/api/check-out', {
                 method: 'POST',
@@ -730,6 +787,7 @@ HTML_TEMPLATE = '''
             if (res.ok) {
                 msgDiv.className = 'message success';
                 msgDiv.innerHTML = '✅ ' + data.message;
+                stopLocationTracking();
                 capturedSelfie = null;
                 document.getElementById('selfieStatus').style.display = 'none';
                 loadStats();
@@ -744,9 +802,7 @@ HTML_TEMPLATE = '''
         setTimeout(() => msgDiv.style.display = 'none', 5000);
     }
 
-    function setupWorkTabs() {
-        // No camera needed anymore - just file upload
-    }
+    function setupWorkTabs() {}
 
     async function uploadWorkPhotos() {
         const fileInput = document.getElementById('workPhotoInput');
@@ -858,12 +914,11 @@ HTML_TEMPLATE = '''
     }
 
     async function deleteMediaItem(publicId) {
-        if (confirm('⚠️ Delete this photo permanently? This action cannot be undone.')) {
+        if (confirm('⚠️ Delete this photo permanently?')) {
             const res = await fetch(`/api/admin/delete-media/${encodeURIComponent(publicId)}`, {
                 method: 'DELETE'
             });
             const data = await res.json();
-            
             if (res.ok) {
                 alert('✅ Photo deleted!');
                 loadMediaLibrary();
@@ -1077,6 +1132,46 @@ HTML_TEMPLATE = '''
         }
     }
 
+    async function loadUserRoute() {
+        const userId = document.getElementById('trackUserSelect').value;
+        const date = document.getElementById('trackDate').value;
+        
+        if (!userId || !date) {
+            alert('Please select user and date');
+            return;
+        }
+        
+        const res = await fetch(`/api/admin/user-route/${userId}/${date}`);
+        const data = await res.json();
+        
+        if (data.locations && data.locations.length > 0) {
+            let tableHtml = '能able<thead><tr><th>Time</th><th>Latitude</th><th>Longitude</th></tr></thead><tbody>';
+            for (let loc of data.locations) {
+                tableHtml += `<tr>
+                    <td>${new Date(loc.timestamp).toLocaleTimeString()}</td>
+                    <td>${loc.latitude}</td>
+                    <td>${loc.longitude}</td>
+                </tr>`;
+            }
+            tableHtml += '</tbody></table>';
+            document.getElementById('locationTable').innerHTML = tableHtml;
+        } else {
+            document.getElementById('locationTable').innerHTML = '<p>No location data for this user/date.</p>';
+        }
+    }
+
+    async function loadUsersForTracking() {
+        const res = await fetch('/api/admin/users');
+        const data = await res.json();
+        const select = document.getElementById('trackUserSelect');
+        if (select) {
+            select.innerHTML = '<option value="">Select User</option>';
+            for (let u of data.users) {
+                select.innerHTML += `<option value="${u.id}">${u.full_name}</option>`;
+            }
+        }
+    }
+
     async function logout() {
         await fetch('/api/logout', {method: 'POST'});
         location.reload();
@@ -1150,7 +1245,10 @@ def check_in():
     db.session.add(attendance)
     db.session.commit()
     
-    return jsonify({'message': f'Checked in at {indian_now.strftime("%I:%M %p")} IST with selfie!'})
+    return jsonify({
+        'message': f'Checked in at {indian_now.strftime("%I:%M %p")} IST with selfie!',
+        'attendance_id': attendance.id
+    })
 
 @app.route('/api/check-out', methods=['POST'])
 @login_required
@@ -1179,6 +1277,47 @@ def check_out():
     db.session.commit()
     
     return jsonify({'message': f'Checked out at {indian_now.strftime("%I:%M %p")} IST with selfie!'})
+
+@app.route('/api/update-location', methods=['POST'])
+@login_required
+def update_location():
+    data = request.json
+    user_id = session['user_id']
+    attendance_id = data['attendance_id']
+    
+    location = LocationTrack(
+        user_id=user_id,
+        attendance_id=attendance_id,
+        latitude=data['latitude'],
+        longitude=data['longitude'],
+        accuracy=data.get('accuracy', 0)
+    )
+    db.session.add(location)
+    db.session.commit()
+    
+    return jsonify({'message': 'Location updated'})
+
+@app.route('/api/admin/user-route/<int:user_id>/<date>')
+@admin_required
+def get_user_route(user_id, date):
+    target_date = datetime.strptime(date, '%Y-%m-%d').date()
+    
+    attendance = Attendance.query.filter_by(user_id=user_id, date=target_date).first()
+    if not attendance:
+        return jsonify({'locations': []})
+    
+    locations = LocationTrack.query.filter_by(
+        user_id=user_id, 
+        attendance_id=attendance.id
+    ).order_by(LocationTrack.timestamp).all()
+    
+    return jsonify({
+        'locations': [{
+            'latitude': loc.latitude,
+            'longitude': loc.longitude,
+            'timestamp': loc.timestamp.isoformat()
+        } for loc in locations]
+    })
 
 @app.route('/api/today-status')
 @login_required
@@ -1273,11 +1412,9 @@ def upload_work_photo():
 @app.route('/api/admin/all-media')
 @admin_required
 def get_all_media():
-    """Get all selfies and work photos from Cloudinary"""
     try:
         all_photos = []
         
-        # Get selfies
         try:
             selfies = cloudinary.api.resources(
                 type='upload',
@@ -1297,7 +1434,6 @@ def get_all_media():
         except:
             pass
         
-        # Get work photos
         try:
             work_photos = cloudinary.api.resources(
                 type='upload',
@@ -1324,7 +1460,6 @@ def get_all_media():
 @app.route('/api/admin/delete-media/<path:public_id>', methods=['DELETE'])
 @admin_required
 def delete_media(public_id):
-    """Delete a photo from Cloudinary"""
     try:
         cloudinary.api.delete_resources([public_id])
         return jsonify({'message': 'Photo deleted successfully!'})
@@ -1377,6 +1512,7 @@ def delete_user(user_id):
     
     Attendance.query.filter_by(user_id=user_id).delete()
     WorkPhoto.query.filter_by(user_id=user_id).delete()
+    LocationTrack.query.filter_by(user_id=user_id).delete()
     db.session.delete(user)
     db.session.commit()
     
